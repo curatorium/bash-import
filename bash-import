@@ -1,0 +1,215 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+# @name bash-import
+# @type command
+# @desc Main entry point for the import tool. Dispatches to subcommands.
+#
+# @usage bash-import [-q] [-x <lvl: app|all>] <cmd: pack|fetch|install> [...args]
+# @usage bash-import -h
+#
+# @arg <cmd>                        -- Subcommand: fetch, pack, or install
+# @flag [-q|--quiet]                -- Suppress output.
+# @opt  [-x|--trace <lvl: app|all>] -- Level of debug tracing, "app" traces only this file, "all" also traces dependencies.
+# @flag [-h|--help]                 -- Print the help instructions
+function import:main() {
+	[[ "${BASH_SOURCE[1]}" != "${0}" ]] && return;
+
+	strict:on;
+
+	# shellcheck disable=SC2034 # Used inside args:*
+	local ARGS=("$@");
+
+	local -a cmdargs=(); local cmd=""; args:sub cmd cmdargs '^(fetch|pack|install)$';
+
+	local help=""; args:flag help h;
+	[[ "$help" == "true" ]] && import:help && return;
+
+	local quiet=""; args:flag quiet q; # dynamic scope: read by import:log()
+	# noop instead of logging
+	[[ -n "$quiet" ]] && alias import:log=':';
+
+	local trace=""; args:opt trace x;
+	# shellcheck disable=SC2064
+	[[ -n "$trace" && -z "$quiet" ]] && "trace:$trace" && trap "trace:stop" EXIT;
+
+
+	# Arguments for subcommands
+
+	# shellcheck disable=SC2034 # Used inside args:*
+	ARGS=("${cmdargs[@]}");
+	local file="/dev/stdin"; args:arg -o file;
+	local dir="$PWD";
+	[[ ! "$file" =~ ^/dev ]] && dir="$(dirname "$file")";
+
+	local tmp; tmp="$(mktemp -p "$dir")";
+	# shellcheck disable=SC2064
+	trap "rm -f '$tmp'" EXIT;
+
+	local out="/dev/stdout"; [[ "$cmd" == "install" ]] && out="$(basename "$file")"; args:opt out o;
+	[[ ! "$out" =~ ^/dev ]] && mkdir -p "$(dirname "$out")";
+
+	# Need a temporary file we can `sed -i` even when $file=/dev/stdin
+	cat "$file" > "$tmp";
+
+	"import:$cmd" "$tmp" "$out" "$dir";
+}
+
+# @name bash-import fetch
+# @type subcommand
+# @desc Downloads remote dependencies from .deps/@https/* and .deps/@github/* paths.
+#
+# @usage bash-import fetch <file>
+# @usage bash-import fetch < <file>
+# @usage cat <file> | bash-import fetch
+#
+# @arg  <file>            -- Input file.
+function import:fetch() {
+	local file="$1"; shift;
+	local out="$1"; shift;
+	local dir="$1"; shift;
+
+	# Collect unique dependency paths
+	local -A files=();
+	local path;
+	while read -r path; do
+		[[ -n "$path" ]] && files["$path"]="";
+	done < <(grep -oP '^\s*source\s+["\047]?(\./)?\.deps/\K@(github|https?)/[^\s;#"\047]+' "$file" 2>/dev/null || true)
+
+	# Fetch each dependency
+	local mtime;
+	for path in "${!files[@]}"; do
+		mtime="$(stat -c %Y "$dir/.deps/$path" 2>/dev/null || echo 0)";
+		mkdir -p "$(dirname "$dir/.deps/$path")";
+
+		if [[ "$path" =~ ^@(https?)/(.+) ]]; then
+			curl -1fsSLR "${BASH_REMATCH[1]}://${BASH_REMATCH[2]}" -z "$dir/.deps/$path" -o "$dir/.deps/$path" 2>/dev/null;
+			[[ -f "$dir/.deps/$path" ]] || { import:log "failed" ".deps/$path"; continue; };
+			import:log "$([[ "$(stat -c %Y "$dir/.deps/$path")" == "$mtime" ]] && echo found || echo fetched)" ".deps/$path";
+			continue;
+		fi
+
+		if [[ "$path" =~ ^@github/([^/]+)/([^@]+)@([^/]+)/(.+) ]]; then
+			local vendor="${BASH_REMATCH[1]}";
+			local repo="${BASH_REMATCH[2]}";
+			local version="${BASH_REMATCH[3]}";
+			local rest="${BASH_REMATCH[4]}";
+
+			# Try: release -> tag -> branch
+			local urls=(
+				"$(
+					[[ "$version" == "latest" ]] &&
+						echo "https://github.com/$vendor/$repo/releases/latest/download/$rest" ||
+						echo "https://github.com/$vendor/$repo/releases/download/$version/$rest"
+				)"
+				"https://raw.githubusercontent.com/$vendor/$repo/refs/tags/$version/$rest"
+				"https://raw.githubusercontent.com/$vendor/$repo/refs/heads/$version/$rest"
+			);
+			for url in "${urls[@]}"; do
+				curl -1fsSLR "$url" -z "$dir/.deps/$path" -o "$dir/.deps/$path" 2>/dev/null && break;
+			done
+			[[ -f "$dir/.deps/$path" ]] || { import:log "failed" ".deps/$path"; continue; };
+			import:log "$([[ "$(stat -c %Y "$dir/.deps/$path")" == "$mtime" ]] && echo found || echo fetched)" ".deps/$path";
+			continue;
+		fi
+	done
+}
+
+# @name bash-import pack
+# @type subcommand
+# @desc Inlines source .deps/... statements into a single output file.
+#
+# @usage bash-import pack <file> [-o <out>]
+# @usage bash-import pack < <file> > <out>
+# @usage cat <file> | bash-import pack > <out>
+#
+# @arg <file>            -- Input file.
+# @opt [-o|--out  <out>] -- Output file. Default: /dev/stdout.
+function import:pack() {
+	local file="$1"; shift;
+	local out="$1"; shift;
+	local dir="$1"; shift;
+
+	import:fetch "$file" "$out" "$dir";
+
+	local nr=0;
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		((++nr));
+
+		# Inject the LICENSE file
+		[[ $nr -eq 2 && "$line" =~ ^#\ Copyright ]] && awk '{print "# " $0}' LICENSE && continue;
+
+		# Non-source lines: pass through
+		if [[ ! "$line" =~ ^[[:space:]]*source[[:space:]]+[\"\']?(\./)?(\.deps/[^\"\'\;#[:space:]]+) ]]; then
+			echo "$line";
+			continue;
+		fi
+
+		# Source lines: inline the dependency
+		local src="${BASH_REMATCH[2]}"
+		src="${src#[\"\']}";
+		src="${src%[\"\']}";
+		src="$dir/$src";
+
+		# Special case: .deps/@help is a generator script - execute it and wrap output in heredoc
+		if [[ "$src" == "$dir/.deps/@help" ]]; then
+			local indent="${line%%source*}";
+			echo "${indent}cat <<'HELP'";
+			"$src";
+			echo "HELP";
+			import:log "packed" "${BASH_REMATCH[2]}";
+			continue;
+		fi
+
+		[[ -f "$src" ]] || { import:log "failed" "${BASH_REMATCH[2]}"; continue; };
+		awk 'NR==1 && /^#!/ {next} NR==2 && /^# Copyright/ {next} 1' "$src"
+		import:log "packed" "${BASH_REMATCH[2]}";
+	done < "$file" > "$out";
+	import:log "wrote" "$out";
+}
+
+# @name bash-import install
+# @type subcommand
+# @desc Packs a script and installs it to /usr/local/bin.
+#
+# @usage bash-import install <file> [-o <out>]
+#
+# @arg <file>            -- Input file.
+# @opt [-o|--out  <out>] -- Output file. Default: /usr/local/bin/<basename of file>.
+function import:install() {
+	local file="$1"; shift;
+	local out="$1";  shift; out="/usr/local/bin/$out"
+	local dir="$1";  shift;
+
+	local tmp; tmp="$(mktemp)";
+	# shellcheck disable=SC2064 #
+	trap "rm -f '$tmp';" RETURN;
+
+	import:pack "$file" "$tmp" "$dir";
+	sudo install -m 755 "$tmp" "$out";
+}
+
+function import:log() {
+	[[ "$quiet" == "true" ]] && return; # dynamic scope: set in import:main()
+
+	local GRN=$'\033[32m';
+	local YLW=$'\033[33m';
+	local RED=$'\033[31m';
+	local RST=$'\033[0m';
+
+	local color="$GRN";
+	[[ "$1" == "found" ]] && color="$YLW";
+	[[ "$1" == "failed" ]] && color="$RED";
+	printf "  %s%-7s%s %s\n" "$color" "$1" "$RST" "$2" >&2;
+}
+
+function import:help() {
+	source .deps/@help;
+}
+
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh;
+source .deps/docs.sh;
+source .deps/strict.sh;
+source .deps/trace.sh;
+
+import:main "$@"

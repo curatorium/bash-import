@@ -1,0 +1,102 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+# @name test
+# @type command
+# @desc Test runner. Sources a test file, runs it, and prints a summary.
+#
+# @usage test <file.test> [name]
+function test:main() {
+	[[ "${BASH_SOURCE[1]}" != "${0}" ]] && return;
+	local file="${1?usage: test <file.test> [name]}"; [[ "$file" != *.test ]] && file="$file.test";
+	local name="${2:-}";
+
+	SRC_DIR=$PWD;
+	RESULTS_FILE=$(mktemp);
+	trap 'rm -f $RESULTS_FILE' EXIT;
+	echo "0 0 0" > "$RESULTS_FILE";
+
+	source "$file";
+
+	if [[ -n "$name" ]]; then
+		t "$name";
+	else
+		declare -f output >/dev/null 2>&1 && output;
+	fi
+
+	test:summary;
+}
+
+# @name t
+# @type function
+# @desc Run a test function and return ✅/❌/⚠️
+#
+# @usage $(t name)
+#
+# @arg <name> -- The test function to execute (test: prefix added automatically).
+#
+# @return 0 always (result is printed as emoji)
+function t() {
+	TEST_DIR=$(mktemp -d);
+	local output rc;
+
+	# Save inherit_errexit.
+	local inherit_errexit; inherit_errexit=$(shopt -p inherit_errexit);
+
+	# Disable inherit_errexit -- test needs it disabled.
+	shopt -u inherit_errexit;
+	output=$(
+		# Restore inherit_errexit so tests work under their own assumptions
+		$inherit_errexit;
+		trap 'declare -f teardown >/dev/null 2>&1 && teardown; rm -rf "$TEST_DIR"' EXIT;
+		cd "$TEST_DIR" || exit;
+		declare -f setup >/dev/null 2>&1 && setup;
+		"test:$1" 2>&1
+	) && rc=0 || rc=$?;
+
+	# Restore inherit_errexit
+	$inherit_errexit;
+
+	local pass fail err;
+	read -r pass fail err < "$RESULTS_FILE";
+
+	if [[ $rc -eq 0 ]]; then
+		echo "$((pass+1)) $fail $err" > "$RESULTS_FILE";
+		echo "✅";
+	elif [[ $rc -eq 1 ]]; then
+		echo "$pass $((fail+1)) $err" > "$RESULTS_FILE";
+		echo "❌";
+		[[ -n "$output" ]] && echo "   └─ $output" >&2;
+	else
+		echo "$pass $fail $((err+1))" > "$RESULTS_FILE";
+		echo "⚠️";
+		[[ -n "$output" ]] && echo "   └─ $output" >&2;
+	fi
+}
+
+# @name test:summary
+# @type function
+# @desc Print summary table and exit with appropriate code.
+#
+# @usage test:summary
+#
+# @return 0 when all tests pass
+# @return 1 when any test fails or errors
+function test:summary() {
+	local pass fail err;
+	read -r pass fail err < "$RESULTS_FILE";
+	rm -f "$RESULTS_FILE";
+
+	echo "";
+	echo "## Summary";
+	echo "";
+	echo "| ✅ Pass | ❌ Fail | ⚠️ Error |";
+	echo "|---------|---------|----------|";
+	echo "| $pass | $fail | $err |";
+	echo "";
+	[[ $fail -eq 0 && $err -eq 0 ]] && exit 0 || exit 1;
+}
+
+source .deps/assert.sh;
+
+test:main "$@";
