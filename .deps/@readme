@@ -1,0 +1,73 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+set -Eeuo pipefail;
+shopt -s inherit_errexit;
+shopt -s nullglob;
+
+DOCFILE="$(dirname "$0")/../bash-import";
+
+# Source the import file to get docs:* functions
+source "$DOCFILE";
+
+BEGIN_CODE='```bash'
+END_CODE='```'
+
+# Generate README.md
+cat <<-MD
+	# bash-import
+
+	> Dependency manager and source inliner for bash scripts.
+
+	## Installation
+
+	$BEGIN_CODE
+	curl -1fsSLR https://github.com/curatorium/bash-import/releases/latest/download/bash-import -o /usr/local/bin/bash-import
+	chmod +x /usr/local/bin/bash-import
+	$END_CODE
+
+	## Usage
+
+	$([[ -n "$(docs:tag bash-import usage)" ]] && cat <<-xMD
+		$BEGIN_CODE
+		$(docs:tag bash-import usage | sed 's/^/  /')
+		$END_CODE
+	xMD
+	)
+
+	$(docs:tag -f md bash-import flag,opt,arg)
+
+	## Subcommands
+MD
+
+docs:list subcommand | while IFS= read -r name; do
+	cat <<-MD
+		### \`$name\`
+
+		$(docs:tag "$name" desc)
+
+	MD
+
+	if [[ -n "$(docs:tag "$name" usage)" ]]; then
+		cat <<-MD
+			$BEGIN_CODE
+			$(docs:tag "$name" usage)
+			$END_CODE
+
+		MD
+	fi
+
+	if [[ -n "$(docs:tag -f md "$name" flag,opt,arg)" ]]; then
+		cat <<-MD
+			$(docs:tag -f md "$name" flag,opt,arg)
+
+		MD
+	fi
+done
+
+cat <<-MD
+
+	## License
+
+	MIT
+MD

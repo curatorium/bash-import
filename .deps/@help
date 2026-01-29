@@ -1,0 +1,33 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+DOCFILE="$(dirname "${BASH_SOURCE[0]}")/../bash-import";
+export DOCFILE;
+
+# Source the import file to get docs:* functions
+source "$DOCFILE";
+
+T=$'\t'
+
+cat <<-TXT
+	NAME
+	${T}bash-import -- $(docs:tag bash-import desc)
+
+	USAGE
+	$(docs:tag -i 1 bash-import usage)
+
+	$(docs:tag -i 1 bash-import flag,opt,arg)
+
+	SUBCOMMANDS
+TXT
+
+docs:list subcommand | while IFS= read -r name; do
+	cat <<-TXT | awk 'NF{print; blank=0} !NF && !blank++{print ""}'
+		$name -- $(docs:tag "$name" desc)
+
+		$(docs:tag -i 1 "$name" usage)
+
+		$(docs:tag -i 1 "$name" flag,opt,arg)
+
+	TXT
+done | sed 's/^/\t/'
