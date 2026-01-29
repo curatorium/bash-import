@@ -1,0 +1,744 @@
+source ./bash-import;
+
+# Test Fixtures
+#------------------------------------------------------------------------------
+
+setup() {
+	mkdir -p .deps;
+
+	# Minimal dep (for log-based tests)
+	touch .deps/lib;
+
+	# Full dep with headers (for integrity test)
+	cat > .deps/lib-full <<'EOF'
+#!/bin/bash
+# Copyright (c) 2025 Test
+echo "dep content"
+EOF
+
+	# LICENSE file for injection tests
+	cat > LICENSE <<'EOF'
+Copyright (c) 2025 Test
+EOF
+
+	# Mock sudo: passthrough but redirect /usr/local/bin → test dir
+	sudo() {
+		local args=()
+		for a in "$@"; do args+=("${a//\/usr\/local\/bin/$PWD}"); done
+		"${args[@]}"
+	}
+}
+
+# Smoke Tests — happy path, tool fundamentally works
+#------------------------------------------------------------------------------
+
+test:smoke:self-pack() {
+	local result;
+	result=$(cd "$SRC_DIR" && ./bash-import pack bash-import 2>&1);
+	local rc=$?;
+	assert:status $rc 0 "bash-import pack bash-import" || return 1;
+	assert:contains "$result" 'function import:main()' || return 1;
+	assert:contains "$result" 'function args:' "args inlined" || return 1;
+}
+
+test:smoke:pack-inline() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+	assert:contains "$log" ".deps/lib" || return 1;
+}
+
+test:smoke:fetch-github() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+}
+
+test:smoke:fetch-https() {
+	cat > main <<'EOF'
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+}
+
+test:smoke:install() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+echo "hello"
+EOF
+	import:install main "test-bin" "$PWD" 2>/dev/null;
+	[[ -f "$PWD/test-bin" ]] || { echo "output file not created"; return 1; }
+	assert:contains "$(cat "$PWD/test-bin")" 'echo "hello"' "content packed" || return 1;
+}
+
+test:smoke:quiet() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import -q pack bash-import 2>&1 >/dev/null);
+	assert "$log" "" "quiet suppresses output" || return 1;
+}
+
+test:smoke:trace() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import -x app pack bash-import 2>&1 >/dev/null);
+	assert:contains "$log" "import:" "trace output present" || return 1;
+}
+
+# Feature Tests — one feature at a time
+#------------------------------------------------------------------------------
+
+# source line formats
+#--------------------------------------
+
+test:feature:source:passthrough() {
+	cat > main <<'EOF'
+#!/bin/bash
+echo "no sources here"
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	[[ "$log" != *"packed"* ]] || { echo "should not contain 'packed'"; return 1; }
+	assert:contains "$log" "wrote" || return 1;
+}
+
+test:feature:source:quoted() {
+	cat > main <<'EOF'
+#!/bin/bash
+source ".deps/lib"
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:feature:source:single-quoted() {
+	cat > main <<'EOF'
+#!/bin/bash
+source '.deps/lib'
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:feature:source:dotslash() {
+	cat > main <<'EOF'
+#!/bin/bash
+source ./.deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:feature:source:indented() {
+	cat > main <<'EOF'
+#!/bin/bash
+function foo() {
+	source .deps/lib
+}
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:feature:source:semicolon() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib;
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+# source line rejection
+#--------------------------------------
+
+test:feature:reject:commented() {
+	cat > main <<'EOF'
+#!/bin/bash
+# source .deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	[[ "$log" != *"packed"* ]] || { echo "commented source should not be packed"; return 1; }
+}
+
+test:feature:reject:in-string() {
+	cat > main <<'EOF'
+#!/bin/bash
+echo "source .deps/lib"
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	[[ "$log" != *"packed"* ]] || { echo "source in string should not be packed"; return 1; }
+}
+
+test:feature:reject:dot-builtin() {
+	cat > main <<'EOF'
+#!/bin/bash
+. .deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	[[ "$log" != *"packed"* ]] || { echo "dot builtin should not be packed"; return 1; }
+}
+
+# dep content handling
+#--------------------------------------
+
+test:feature:content:integrity() {
+	cat > main <<'EOF'
+#!/bin/bash
+# A comment
+VAR="value"
+source .deps/lib-full
+echo "end"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" 'echo "dep content"' "dep inlined" || return 1;
+	local shebang_count;
+	shebang_count=$(echo "$result" | grep -c '^#!/bin/bash$');
+	assert "$shebang_count" "1" "only main shebang" || return 1;
+	[[ "$result" != *"# Copyright (c) 2025 Test"* ]] || { echo "dep copyright should be stripped"; return 1; }
+	assert:contains "$result" '# A comment' "comment preserved" || return 1;
+	assert:contains "$result" 'VAR="value"' "var preserved" || return 1;
+	assert:contains "$result" 'echo "end"' "end preserved" || return 1;
+}
+
+test:feature:content:install-strips() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib-full
+echo "end"
+EOF
+	import:install main "test-bin" "$PWD" 2>/dev/null;
+	local result; result=$(cat "$PWD/test-bin");
+	local shebang_count; shebang_count=$(echo "$result" | grep -c '^#!/bin/bash$');
+	assert "$shebang_count" "1" "only main shebang" || return 1;
+	[[ "$result" != *"# Copyright (c) 2025 Test"* ]] || { echo "dep copyright should be stripped"; return 1; }
+	assert:contains "$result" 'echo "dep content"' "dep inlined" || return 1;
+	assert:contains "$result" 'echo "end"' "main preserved" || return 1;
+}
+
+test:feature:content:shebang-only() {
+	cat > .deps/lib-shebang <<'EOF'
+#!/bin/bash
+echo "shebang dep"
+EOF
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib-shebang
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	local count; count=$(echo "$result" | grep -c '^#!/bin/bash$');
+	assert "$count" "1" "only main shebang" || return 1;
+	assert:contains "$result" 'echo "shebang dep"' "content preserved" || return 1;
+}
+
+test:feature:content:no-headers() {
+	cat > .deps/lib-plain <<'EOF'
+echo "plain dep"
+more code
+EOF
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib-plain
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" 'echo "plain dep"' "line 1 preserved" || return 1;
+	assert:contains "$result" 'more code' "line 2 preserved" || return 1;
+}
+
+test:feature:content:empty-dep() {
+	touch .deps/lib-empty;
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib-empty
+echo "after"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" 'echo "after"' "main code after empty dep" || return 1;
+}
+
+test:feature:content:single-line-input() {
+	echo '#!/bin/bash' > main;
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" '#!/bin/bash' "shebang preserved" || return 1;
+}
+
+test:feature:content:help-heredoc() {
+	cat > .deps/@help <<'SCRIPT'
+#!/bin/bash
+echo "Usage: my-tool [options]"
+echo "  -h  Show help"
+SCRIPT
+	chmod +x .deps/@help;
+	cat > main <<'EOF'
+#!/bin/bash
+function my_help() {
+	source .deps/@help
+}
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" "cat <<'HELP'" "heredoc open" || return 1;
+	assert:contains "$result" "Usage: my-tool" "help content" || return 1;
+}
+
+test:feature:content:empty-input() {
+	touch main;
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	local rc=$?;
+	assert:status $rc 0 "pack empty input" || return 1;
+}
+
+# LICENSE injection
+#--------------------------------------
+
+test:feature:license:injects() {
+	cat > main <<'EOF'
+#!/bin/bash
+# Copyright (c) 2025 Test Author
+echo "code"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" '# Copyright (c) 2025 Test' "license copyright" || return 1;
+}
+
+test:feature:license:skips-no-copyright() {
+	cat > main <<'EOF'
+#!/bin/bash
+# Just a comment, not copyright
+echo "code"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	[[ "$result" != *"Copyright (c) 2025"* ]] || {
+		echo "should not inject license without copyright line";
+		return 1;
+	}
+	assert:contains "$result" '# Just a comment' || return 1;
+}
+
+test:feature:license:comments() {
+	local result;
+	result=$(awk '{print "# " $0}' LICENSE);
+	assert:contains "$result" '# Copyright (c) 2025 Test' || return 1;
+}
+
+# fetch behavior
+#--------------------------------------
+
+test:feature:fetch:creates-dirs() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	[[ -d .deps/@github/curatorium ]] || { echo "directories not created"; return 1; }
+}
+
+test:feature:fetch:skips-existing() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" || return 1;
+}
+
+test:feature:fetch:no-remote-deps() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+EOF
+	local log;
+	log=$(import:fetch main "" "$PWD" 2>&1);
+	assert "$log" "" "no remote deps is a no-op" || return 1;
+}
+
+test:feature:fetch:stale-refetch() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" 2>/dev/null || return 1;
+	# Make file old (year 2020)
+	touch -t 202001010000 .deps/@github/curatorium/bash-import@main/LICENSE;
+	local old_mtime;
+	old_mtime=$(stat -c %Y .deps/@github/curatorium/bash-import@main/LICENSE);
+	# Refetch — curl -z should detect stale and re-download
+	import:fetch main "" "$PWD" 2>/dev/null || return 1;
+	local new_mtime;
+	new_mtime=$(stat -c %Y .deps/@github/curatorium/bash-import@main/LICENSE);
+	[[ "$new_mtime" != "$old_mtime" ]] || { echo "mtime should change for stale file"; return 1; }
+}
+
+test:feature:fetch:fresh-found() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" 2>/dev/null || return 1;
+	local log;
+	log=$(import:fetch main "" "$PWD" 2>&1);
+	assert:contains "$log" "found" "second fetch should log found" || return 1;
+}
+
+test:feature:fetch:dedup() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	local log;
+	log=$(import:fetch main "" "$PWD" 2>&1);
+	local count;
+	count=$(echo "$log" | grep -c "LICENSE");
+	assert "$count" "1" "dedup: one log line for duplicate deps" || return 1;
+}
+
+# URL fallback strategies
+#--------------------------------------
+
+test:feature:fallback:latest-release() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@latest/bash-args.sh)" "function args:flag" "latest release" || return 1;
+}
+
+test:feature:fallback:named-release() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh)" "function args:flag" "named release" || return 1;
+}
+
+test:feature:fallback:branch() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@main/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@main/bash-args.sh)" "function args:flag" "branch fallback" || return 1;
+}
+
+# flag forms
+#--------------------------------------
+
+test:feature:flags:quiet-long() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import --quiet pack bash-import 2>&1 >/dev/null);
+	assert "$log" "" "quiet long form" || return 1;
+}
+
+test:feature:flags:trace-long() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import --trace app pack bash-import 2>&1 >/dev/null);
+	assert:contains "$log" "import:" "trace long form" || return 1;
+}
+
+# install
+#--------------------------------------
+
+test:feature:install:permissions() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+EOF
+	import:install main "test-bin" "$PWD" 2>/dev/null;
+	local perms; perms=$(stat -c %a "$PWD/test-bin");
+	assert "$perms" "755" "permissions" || return 1;
+}
+
+test:feature:install:overwrite() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+echo "v2"
+EOF
+	echo "old content" > "$PWD/test-bin";
+	import:install main "test-bin" "$PWD" 2>/dev/null;
+	assert:contains "$(cat "$PWD/test-bin")" 'echo "v2"' "overwritten with new content" || return 1;
+}
+
+# Acceptance Tests — feature combinations
+#------------------------------------------------------------------------------
+
+test:accept:multiple-sources() {
+	touch .deps/lib2;
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+source .deps/lib2
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	local count;
+	count=$(echo "$log" | grep -c "packed");
+	assert "$count" "2" "two deps packed" || return 1;
+}
+
+test:accept:fetch-multiple-deps() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	[[ -f .deps/@github/curatorium/bash-import@main/LICENSE ]] || { echo "github dep missing"; return 1; }
+	[[ -f .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE ]] || { echo "https dep missing"; return 1; }
+}
+
+test:accept:fetch-then-pack() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/@github/curatorium/bash-import@main/LICENSE
+echo "done"
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null) || return 1;
+	assert:contains "$result" "Copyright (c) 2025" "dep inlined" || return 1;
+	assert:contains "$result" 'echo "done"' "main preserved" || return 1;
+}
+
+test:accept:fetch-via-main() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	(cd "$SRC_DIR" && ./bash-import fetch "$TEST_DIR/main") 2>/dev/null;
+	[[ -f .deps/@github/curatorium/bash-import@main/LICENSE ]] || { echo "file not fetched via main"; return 1; }
+	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright" "content fetched" || return 1;
+}
+
+test:accept:install-via-main() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+echo "installed"
+EOF
+	mkdir -p bin;
+	cat > bin/sudo <<MOCK
+#!/bin/bash
+args=()
+for a in "\$@"; do args+=("\${a//\/usr\/local\/bin/$PWD}"); done
+"\${args[@]}"
+MOCK
+	chmod +x bin/sudo;
+	PATH="$PWD/bin:$PATH" bash -c "cd '$SRC_DIR' && ./bash-import install '$TEST_DIR/main' -o test-bin" 2>/dev/null;
+	[[ -f "$PWD/test-bin" ]] || { echo "output file not created via main"; return 1; }
+	assert:contains "$(cat "$PWD/test-bin")" 'echo "installed"' "content packed" || return 1;
+}
+
+test:accept:stdin-pipe() {
+	local result;
+	result=$(cd "$SRC_DIR" && cat bash-import | ./bash-import pack 2>/dev/null);
+	assert:contains "$result" 'function import:main()' "piped self-pack" || return 1;
+}
+
+# Regression Tests — edge cases, interactions, error paths
+#------------------------------------------------------------------------------
+
+test:regress:flags:quiet-trace() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import -q -x app pack bash-import 2>&1 >/dev/null);
+	assert "$log" "" "quiet should suppress trace" || return 1;
+}
+
+test:regress:license:no-file() {
+	rm -f LICENSE;
+	cat > main <<'EOF'
+#!/bin/bash
+# Copyright (c) 2025 Test Author
+echo "code"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	local rc=$?;
+	assert:status $rc 0 "pack should not crash without LICENSE" || return 1;
+	assert:contains "$result" 'echo "code"' "code preserved" || return 1;
+}
+
+test:regress:error:missing-dep() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/nonexistent
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "failed" "missing dep should log failed" || return 1;
+}
+
+test:regress:error:nonexistent-repo() {
+	cat > main <<'EOF'
+source .deps/@github/nonexistent-user-xyz/nonexistent-repo-xyz@latest/file.sh
+EOF
+	local log;
+	log=$(import:fetch main "" "$PWD" 2>&1);
+	assert:contains "$log" "failed" "nonexistent repo should fail" || return 1;
+}
+
+test:regress:error:missing-file() {
+	(cd "$SRC_DIR" && ./bash-import pack nonexistent-file 2>/dev/null);
+	local rc=$?;
+	[[ $rc -ne 0 ]] || { echo "should fail with nonexistent file, got rc=0"; return 1; }
+}
+
+test:regress:install:temp-cleanup() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+echo "cleanup test"
+EOF
+	local marker="$PWD/.mktemp-path";
+	local real_mktemp; real_mktemp=$(which mktemp);
+	mktemp() {
+		local f; f=$("$real_mktemp" "$@");
+		echo "$f" > "$marker";
+		echo "$f";
+	}
+	import:install main "test-bin" "$PWD" 2>/dev/null;
+	local tmpf; tmpf=$(cat "$marker");
+	[[ ! -f "$tmpf" ]] || { echo "temp file not cleaned up: $tmpf"; return 1; }
+}
+
+test:regress:error:install-invalid-input() {
+	import:install "nonexistent-file" "test-bin" "$PWD" 2>/dev/null;
+	# install runs with empty content from nonexistent input
+	[[ -f "$PWD/test-bin" ]] || return 0;
+	local size; size=$(stat -c %s "$PWD/test-bin");
+	assert "$size" "0" "empty output from invalid input" || return 1;
+}
+
+# Output
+#------------------------------------------------------------------------------
+
+output() {
+cat <<MD
+# import Test Results
+
+## Smoke Tests
+
+Scenario     | Description                      | Status | Result
+-------------|----------------------------------|--------|-------
+self-pack    | bash-import packs itself          |      0 | $(test smoke:self-pack)
+pack-inline  | source .deps/lib → packed log     |      0 | $(test smoke:pack-inline)
+fetch-github | download from github              |      0 | $(test smoke:fetch-github)
+fetch-https  | download from https               |      0 | $(test smoke:fetch-https)
+install      | pack + install to bin              |      0 | $(test smoke:install)
+quiet        | -q suppresses output              |      0 | $(test smoke:quiet)
+trace        | -x app enables tracing            |      0 | $(test smoke:trace)
+
+---
+
+## Feature Tests
+
+### Source line formats
+Scenario      | Input                    | Expected      | Status | Result
+--------------|--------------------------|---------------|--------|-------
+passthrough   | no source lines          | no packed log |      0 | $(test feature:source:passthrough)
+quoted        | source ".deps/lib"       | packed        |      0 | $(test feature:source:quoted)
+single-quoted | source '.deps/lib'       | packed        |      0 | $(test feature:source:single-quoted)
+dotslash      | source ./.deps/lib       | packed        |      0 | $(test feature:source:dotslash)
+indented      | \\tsource .deps/lib       | packed        |      0 | $(test feature:source:indented)
+semicolon     | source .deps/lib;        | packed        |      0 | $(test feature:source:semicolon)
+
+### Source line rejection
+Scenario    | Input                   | Expected   | Status | Result
+------------|-------------------------|------------|--------|-------
+commented   | # source .deps/lib      | not packed |      0 | $(test feature:reject:commented)
+in-string   | echo "source .deps/lib" | not packed |      0 | $(test feature:reject:in-string)
+dot-builtin | . .deps/lib             | not packed |      0 | $(test feature:reject:dot-builtin)
+
+### Dep content handling
+Scenario         | Input                | Expected                  | Status | Result
+-----------------|----------------------|---------------------------|--------|-------
+integrity        | source .deps/lib-full| headers stripped, inlined  |      0 | $(test feature:content:integrity)
+install-strips   | install lib-full dep | headers stripped in output |      0 | $(test feature:content:install-strips)
+shebang-only     | dep: shebang no ©    | shebang stripped, content  |      0 | $(test feature:content:shebang-only)
+no-headers       | dep: no shebang/©    | all content preserved      |      0 | $(test feature:content:no-headers)
+empty-dep        | dep: empty file      | main code preserved        |      0 | $(test feature:content:empty-dep)
+single-line      | input: just shebang  | shebang preserved          |      0 | $(test feature:content:single-line-input)
+help-heredoc     | source .deps/@help   | heredoc wrapping           |      0 | $(test feature:content:help-heredoc)
+empty-input      | input: empty file    | no crash, empty output     |      0 | $(test feature:content:empty-input)
+
+### LICENSE injection
+Scenario           | Input                 | Expected              | Status | Result
+-------------------|-----------------------|-----------------------|--------|-------
+injects            | line 2 is # Copyright | LICENSE content added  |      0 | $(test feature:license:injects)
+skips-no-copyright | line 2 not copyright  | line unchanged         |      0 | $(test feature:license:skips-no-copyright)
+comments           | LICENSE file          | lines prefixed #       |      0 | $(test feature:license:comments)
+
+### Fetch behavior
+Scenario       | Input              | Expected         | Status | Result
+---------------|--------------------|------------------|--------|-------
+creates-dirs   | github nested path | directories made |      0 | $(test feature:fetch:creates-dirs)
+skips-existing | fetch twice        | second uses -z   |      0 | $(test feature:fetch:skips-existing)
+no-remote-deps | source .deps/lib   | no-op            |      0 | $(test feature:fetch:no-remote-deps)
+stale-refetch  | old mtime file     | mtime updated    |      0 | $(test feature:fetch:stale-refetch)
+fresh-found    | fetch twice        | log says "found" |      0 | $(test feature:fetch:fresh-found)
+dedup          | same dep twice     | one log line     |      0 | $(test feature:fetch:dedup)
+
+### URL fallback strategies
+Scenario       | Input                         | Expected            | Status | Result
+---------------|-------------------------------|---------------------|--------|-------
+latest-release | bash-args@latest/bash-args.sh  | releases/latest/... |      0 | $(test feature:fallback:latest-release)
+named-release  | bash-args@v1.0.0-alpha/...     | releases/download/  |      0 | $(test feature:fallback:named-release)
+branch         | bash-args@main/bash-args.sh    | refs/heads/main/... |      0 | $(test feature:fallback:branch)
+
+### Flag forms
+Scenario   | Input                        | Expected         | Status | Result
+-----------|------------------------------|------------------|--------|-------
+quiet-long | --quiet pack bash-import     | no stderr output |      0 | $(test feature:flags:quiet-long)
+trace-long | --trace app pack bash-import | trace present    |      0 | $(test feature:flags:trace-long)
+
+### Install
+Scenario    | Input          | Expected | Status | Result
+------------|----------------|----------|--------|-------
+permissions | install -m 755 | file 755 |      0 | $(test feature:install:permissions)
+overwrite  | install twice  | new wins |      0 | $(test feature:install:overwrite)
+
+---
+
+## Acceptance Tests
+
+Scenario           | Description                | Status | Result
+-------------------|----------------------------|--------|-------
+multiple-sources   | 2 deps in one file         |      0 | $(test accept:multiple-sources)
+fetch-multiple-deps| github + https in one file |      0 | $(test accept:fetch-multiple-deps)
+fetch-then-pack    | fetch + pack pipeline      |      0 | $(test accept:fetch-then-pack)
+fetch-via-main     | ./bash-import fetch e2e    |      0 | $(test accept:fetch-via-main)
+install-via-main   | ./bash-import install e2e  |      0 | $(test accept:install-via-main)
+stdin-pipe         | cat | ./bash-import pack   |      0 | $(test accept:stdin-pipe)
+
+---
+
+## Regression Tests
+
+Scenario         | Description                  | Status | Result
+-----------------|------------------------------|--------|-------
+quiet-trace          | -q -x app: quiet wins        |      0 | $(test regress:flags:quiet-trace)
+no-license-file      | pack without LICENSE in dir   |      0 | $(test regress:license:no-file)
+missing-dep          | source .deps/nonexistent     |      0 | $(test regress:error:missing-dep)
+nonexistent-repo     | fetch from fake github repo  |      0 | $(test regress:error:nonexistent-repo)
+missing-file         | pack nonexistent input file  |      0 | $(test regress:error:missing-file)
+temp-cleanup         | install cleans temp file     |      0 | $(test regress:install:temp-cleanup)
+install-invalid-input| install with bad input file  |      0 | $(test regress:error:install-invalid-input)
+
+MD
+}
