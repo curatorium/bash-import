@@ -1,0 +1,15 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+shellcheck -s bash -x bash-import .deps/*.sh ||
+	{ echo "ERROR: shellcheck failed."; exit 1;	}
+
+bash-test bash-import.test > bash-import.test.md ||
+	{ echo "ERROR: tests failed."; exit 1; }
+
+.deps/@readme > README.md;
+git diff --quiet README.md ||
+	{ echo "WARNING: README.md is out of date."; exit 1; }
+
+git diff --quiet bash-import.test.md ||
+	{ echo "WARNING: reports are out of date."; exit 1; };
