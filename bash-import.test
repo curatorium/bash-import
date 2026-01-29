@@ -1,0 +1,357 @@
+source ./bash-import;
+
+# Test Fixtures
+#------------------------------------------------------------------------------
+
+setup() {
+	mkdir -p .deps;
+
+	# Minimal dep (for log-based tests)
+	touch .deps/lib;
+
+	# Full dep with headers (for integrity test)
+	cat > .deps/lib-full <<'EOF'
+#!/bin/bash
+# Copyright (c) 2025 Test
+echo "dep content"
+EOF
+
+	# LICENSE file for injection tests
+	cat > LICENSE <<'EOF'
+Copyright (c) 2025 Test
+EOF
+}
+
+# import:pack Tests
+#------------------------------------------------------------------------------
+
+test:pack:smoke:basic-inline() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+	assert:contains "$log" ".deps/lib" || return 1;
+}
+
+test:pack:smoke:passthrough() {
+	cat > main <<'EOF'
+#!/bin/bash
+echo "no sources here"
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	[[ "$log" != *"packed"* ]] || { echo "should not contain 'packed'"; return 1; }
+	assert:contains "$log" "wrote" || return 1;
+}
+
+test:pack:accept:quoted-path() {
+	cat > main <<'EOF'
+#!/bin/bash
+source ".deps/lib"
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:pack:accept:dotslash-path() {
+	cat > main <<'EOF'
+#!/bin/bash
+source ./.deps/lib
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:pack:accept:multiple-sources() {
+	touch .deps/lib2;
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib
+source .deps/lib2
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	local count;
+	count=$(echo "$log" | grep -c "packed");
+	assert "$count" "2" "two deps packed" || return 1;
+}
+
+test:pack:accept:semicolon-suffix() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/lib;
+EOF
+	local log;
+	log=$(import:pack main /dev/null "$PWD" 2>&1);
+	assert:contains "$log" "packed" || return 1;
+}
+
+test:pack:accept:integrity() {
+	cat > main <<'EOF'
+#!/bin/bash
+# A comment
+VAR="value"
+source .deps/lib-full
+echo "end"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	# Dep content is inlined
+	assert:contains "$result" 'echo "dep content"' "dep inlined" || return 1;
+	# Dep shebang stripped (only one shebang in output)
+	local shebang_count;
+	shebang_count=$(echo "$result" | grep -c '^#!/bin/bash$');
+	assert "$shebang_count" "1" "only main shebang" || return 1;
+	# Dep copyright stripped
+	[[ "$result" != *"# Copyright (c) 2025 Test"* ]] || { echo "dep copyright should be stripped"; return 1; }
+	# Non-source lines preserved
+	assert:contains "$result" '# A comment' "comment preserved" || return 1;
+	assert:contains "$result" 'VAR="value"' "var preserved" || return 1;
+	assert:contains "$result" 'echo "end"' "end preserved" || return 1;
+}
+
+# import:fetch Tests
+#------------------------------------------------------------------------------
+
+test:fetch:smoke:github-basic() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+}
+
+test:fetch:smoke:https-basic() {
+	cat > main <<'EOF'
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+}
+
+test:fetch:accept:creates-dirs() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	[[ -d .deps/@github/curatorium ]] || { echo "directories not created"; return 1; }
+}
+
+test:fetch:accept:skips-existing() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+EOF
+	# Fetch once
+	import:fetch main "" "$PWD" || return 1;
+	# Fetch again (mtime should match)
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" || return 1;
+}
+
+test:fetch:regress:multiple-deps() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	[[ -f .deps/@github/curatorium/bash-import@main/LICENSE ]] || { echo "github dep missing"; return 1; }
+	[[ -f .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE ]] || { echo "https dep missing"; return 1; }
+}
+
+# URL Fallback Tests (release -> tag -> branch)
+#------------------------------------------------------------------------------
+
+test:fallback:smoke:latest-release() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@latest/bash-args.sh)" "function args:flag" "latest release" || return 1;
+}
+
+test:fallback:smoke:named-release() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh)" "function args:flag" "named release" || return 1;
+}
+
+test:fallback:smoke:branch-fallback() {
+	cat > main <<'EOF'
+source .deps/@github/curatorium/bash-args@main/bash-args.sh
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@main/bash-args.sh)" "function args:flag" "branch fallback" || return 1;
+}
+
+# LICENSE Injection Tests
+#------------------------------------------------------------------------------
+
+test:license:smoke:injects-license() {
+	cat > main <<'EOF'
+#!/bin/bash
+# Copyright (c) 2025 Test Author
+echo "code"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" '# Copyright (c) 2025 Test' "license copyright" || return 1;
+}
+
+test:license:accept:skips-no-copyright() {
+	cat > main <<'EOF'
+#!/bin/bash
+# Just a comment, not copyright
+echo "code"
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	[[ "$result" != *"Copyright (c) 2025"* ]] || {
+		echo "should not inject license without copyright line";
+		return 1;
+	}
+	assert:contains "$result" '# Just a comment' || return 1;
+}
+
+test:license:accept:comments-license() {
+	local result;
+	result=$(awk '{print "# " $0}' LICENSE);
+	assert:contains "$result" '# Copyright (c) 2025 Test' || return 1;
+}
+
+# Flag Tests
+#------------------------------------------------------------------------------
+
+test:flags:smoke:quiet() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import -q pack bash-import 2>&1 >/dev/null);
+	assert "$log" "" "quiet suppresses output" || return 1;
+}
+
+test:flags:smoke:trace() {
+	local log;
+	log=$(cd "$SRC_DIR" && ./bash-import -x app pack bash-import 2>&1 >/dev/null);
+	assert:contains "$log" "import:" "trace output present" || return 1;
+}
+
+# Integration Tests
+#------------------------------------------------------------------------------
+
+test:int:self-pack() {
+	local result;
+	result=$(cd "$SRC_DIR" && ./bash-import pack bash-import 2>&1);
+	local rc=$?;
+	assert:status $rc 0 "bash-import pack bash-import" || return 1;
+	assert:contains "$result" 'function import:main()' || return 1;
+	assert:contains "$result" 'function args:' "args inlined" || return 1;
+}
+
+test:int:fetch-then-pack() {
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/@github/curatorium/bash-import@main/LICENSE
+echo "done"
+EOF
+	import:fetch main "" "$PWD" || return 1;
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null) || return 1;
+	assert:contains "$result" "Copyright (c) 2025" "dep inlined" || return 1;
+	assert:contains "$result" 'echo "done"' "main preserved" || return 1;
+}
+
+# Output
+#------------------------------------------------------------------------------
+
+output() {
+cat <<MD
+# import Test Results
+
+## import:pack
+
+### Smoke Tests
+Scenario      | Input                | Expected         | Status | Result
+--------------|----------------------|------------------|--------|-------
+basic-inline  | source .deps/lib     | packed in log    |      0 | $(test pack:smoke:basic-inline)
+passthrough   | no source lines      | no packed in log |      0 | $(test pack:smoke:passthrough)
+
+### Acceptance Tests
+Scenario          | Input                    | Expected          | Status | Result
+------------------|--------------------------|-------------------|--------|-------
+quoted-path       | source ".deps/lib"       | packed in log     |      0 | $(test pack:accept:quoted-path)
+dotslash-path     | source ./.deps/lib       | packed in log     |      0 | $(test pack:accept:dotslash-path)
+multiple-sources  | 2 source lines           | 2x packed         |      0 | $(test pack:accept:multiple-sources)
+semicolon-suffix  | source .deps/lib;        | packed in log     |      0 | $(test pack:accept:semicolon-suffix)
+integrity         | source + other lines     | inlined, stripped |      0 | $(test pack:accept:integrity)
+
+---
+
+## import:fetch
+
+### Smoke Tests
+Scenario     | Input                              | Expected         | Status | Result
+-------------|------------------------------------|------------------|--------|-------
+github-basic | github/curatorium/...@main/LICENSE  | file downloaded  |      0 | $(test fetch:smoke:github-basic)
+https-basic  | https/raw.githubusercontent.com/...| file downloaded  |      0 | $(test fetch:smoke:https-basic)
+
+### Acceptance Tests
+Scenario       | Input              | Expected           | Status | Result
+---------------|--------------------|--------------------|--------|-------
+creates-dirs   | github nested path | directories made   |      0 | $(test fetch:accept:creates-dirs)
+skips-existing | fetch twice        | second uses -z     |      0 | $(test fetch:accept:skips-existing)
+
+### Regression Tests
+Scenario      | Input            | Expected      | Status | Result
+--------------|------------------|---------------|--------|-------
+multiple-deps | github + https   | both fetched  |      0 | $(test fetch:regress:multiple-deps)
+
+---
+
+## URL Fallback
+
+Scenario        | Input                          | Expected              | Status | Result
+----------------|--------------------------------|-----------------------|--------|-------
+latest-release  | bash-args@latest/bash-args.sh          | releases/latest/...   |      0 | $(test fallback:smoke:latest-release)
+named-release   | bash-args@v1.0.0-alpha/bash-args.sh    | releases/download/... |      0 | $(test fallback:smoke:named-release)
+branch-fallback | bash-args@main/bash-args.sh            | refs/heads/main/...   |      0 | $(test fallback:smoke:branch-fallback)
+
+---
+
+## LICENSE Injection
+
+### Smoke Tests
+Scenario        | Input                | Expected              | Status | Result
+----------------|----------------------|-----------------------|--------|-------
+injects-license | line 2 is # Copyright| LICENSE content added |      0 | $(test license:smoke:injects-license)
+
+### Acceptance Tests
+Scenario           | Input                    | Expected          | Status | Result
+-------------------|--------------------------|-------------------|--------|-------
+skips-no-copyright | line 2 is not copyright  | line unchanged    |      0 | $(test license:accept:skips-no-copyright)
+comments-license   | LICENSE file             | lines prefixed #  |      0 | $(test license:accept:comments-license)
+
+---
+
+## Flags
+
+Scenario | Input                  | Expected             | Status | Result
+---------|------------------------|----------------------|--------|-------
+quiet    | -q pack bash-import    | no stderr output     |      0 | $(test flags:smoke:quiet)
+trace    | -x app pack bash-import| trace lines present  |      0 | $(test flags:smoke:trace)
+
+---
+
+## Integration Tests
+
+Scenario        | Description                          | Status | Result
+----------------|--------------------------------------| -------|-------
+self-pack       | bash-import pack bash-import works   |      0 | $(test int:self-pack)
+fetch-then-pack | fetch + pack real dep                |      0 | $(test int:fetch-then-pack)
+
+MD
+}

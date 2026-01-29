@@ -1,0 +1,112 @@
+#!/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+set -Eeuo pipefail;
+shopt -s inherit_errexit;
+shopt -s nullglob;
+
+DOCFILE="$(dirname "$0")/../bash-import";
+
+# Source the import file to get docs:* functions
+source "$DOCFILE";
+
+BEGIN_CODE='```bash'
+END_CODE='```'
+
+# Generate README.md
+cat <<-MD
+	# bash-import
+
+	> Dependency manager and source inliner for bash scripts.
+
+	## Installation
+
+	$BEGIN_CODE
+	curl -1fsSLR https://github.com/curatorium/bash-import/releases/latest/download/bash-import -o /usr/local/bin/bash-import
+	chmod +x /usr/local/bin/bash-import
+	$END_CODE
+
+	## Usage
+
+	$([[ -n "$(docs:tag import usage)" ]] && cat <<-xMD
+		$BEGIN_CODE
+		$(docs:tag import usage | sed 's/^/  /')
+		$END_CODE
+	xMD
+	)
+
+	$([[ -n "$(docs:tag -f md import flag)" ]] && cat <<-xMD
+		| Flag | Description |
+		|------|-------------|
+		$(docs:tag -f md import flag)
+	xMD
+	)
+
+	$([[ -n "$(docs:tag -f md import opt)" ]] && cat <<-xMD
+		| Option | Description |
+		|--------|-------------|
+		$(docs:tag -f md import opt)
+	xMD
+	)
+
+	$([[ -n "$(docs:tag -f md import arg)" ]] && cat <<-xMD
+		| Argument | Description |
+		|----------|-------------|
+		$(docs:tag -f md import arg)
+	xMD
+	)
+
+	## Subcommands
+MD
+
+docs:list subcommand | while IFS= read -r name; do
+	cat <<-MD
+		### \`$name\`
+
+		$(docs:tag "$name" desc)
+
+	MD
+
+	if [[ -n "$(docs:tag "$name" usage)" ]]; then
+		cat <<-MD
+			$BEGIN_CODE
+			$(docs:tag "$name" usage)
+			$END_CODE
+
+		MD
+	fi
+
+	if [[ -n "$(docs:tag -f md "$name" flag)" ]]; then
+		cat <<-MD
+			| Flag | Description |
+			|------|-------------|
+			$(docs:tag -f md "$name" flag)
+
+		MD
+	fi
+
+	if [[ -n "$(docs:tag -f md "$name" opt)" ]]; then
+		cat <<-MD
+			| Option | Description |
+			|--------|-------------|
+			$(docs:tag -f md "$name" opt)
+
+		MD
+	fi
+
+	if [[ -n "$(docs:tag -f md "$name" arg)" ]]; then
+		cat <<-MD
+			| Argument | Description |
+			|----------|-------------|
+			$(docs:tag -f md "$name" arg)
+
+		MD
+	fi
+done
+
+cat <<-MD
+
+	## License
+
+	MIT
+MD
