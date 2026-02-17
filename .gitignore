@@ -2,3 +2,4 @@
 .deps/@http/
 .deps/@https/
 .dist/
+.idea/

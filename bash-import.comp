@@ -1,0 +1,57 @@
+#!/usr/bin/bash
+# Copyright (c) 2025 Mihai Stancu (https://github.com/curatorium)
+
+#
+# Bash completions for bash-import
+# Completes subcommands, flags, and context-sensitive options.
+#
+
+import:completions() {
+	local subcommands="fetch pack install";
+	local flags="-q --quiet -x --trace -h --help";
+	local out_subs="pack install";
+
+	local cur="${COMP_WORDS[COMP_CWORD]}";
+	local prev="${COMP_WORDS[COMP_CWORD-1]:-}";
+
+	# After -x/--trace: complete trace levels
+	if [[ "$prev" == "-x" || "$prev" == "--trace" ]]; then
+		COMPREPLY=($(compgen -W "app all" -- "$cur"));
+		return;
+	fi
+
+	# After -o/--out: file completion (handled by -o default)
+	[[ "$prev" == "-o" || "$prev" == "--out" ]] && return;
+
+	# Position 1 or flags anywhere before subcommand
+	if [[ $COMP_CWORD -eq 1 || "$cur" == -* ]]; then
+		COMPREPLY=($(compgen -W "$subcommands $flags" -- "$cur"));
+		return;
+	fi
+
+	# Find the subcommand in COMP_WORDS
+	local cmd="";
+	local i;
+	for ((i=1; i < COMP_CWORD; i++)); do
+		if [[ " $subcommands " == *" ${COMP_WORDS[i]} "* ]]; then
+			cmd="${COMP_WORDS[i]}";
+			break;
+		fi
+	done
+
+	# No subcommand yet: offer subcommands
+	if [[ -z "$cmd" ]]; then
+		COMPREPLY=($(compgen -W "$subcommands" -- "$cur"));
+		return;
+	fi
+
+	# After subcommand: offer -o/--out for pack and install
+	if [[ " $out_subs " == *" $cmd "* && "$cur" == -* ]]; then
+		COMPREPLY=($(compgen -W "-o --out" -- "$cur"));
+		return;
+	fi
+
+	# Default: file completion (handled by -o default)
+}
+
+complete -o default -F import:completions bash-import;
