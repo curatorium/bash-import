@@ -67,7 +67,6 @@ Scenario       | Input                         | Expected            | Status | 
 ---------------|-------------------------------|---------------------|--------|-------
 latest-release | bash-args@latest/bash-args.sh  | releases/latest/... |      0 | ✅
 named-release  | bash-args@v1.0.0-alpha/...     | releases/download/  |      0 | ✅
-branch         | bash-args@main/bash-args.sh    | refs/heads/main/... |      0 | ✅
 
 ### Flag forms
 Scenario   | Input                        | Expected         | Status | Result
@@ -113,5 +112,5 @@ install-invalid-input| install with bad input file  |      0 | ✅
 
 | ✅ Pass | ❌ Fail | ⚠️ Error |
 |---------|---------|----------|
-| 53 | 0 | 0 |
+| 52 | 0 | 0 |
 

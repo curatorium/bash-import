@@ -54,18 +54,18 @@ EOF
 
 test:smoke:fetch-github() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
-	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@latest/bash-args.sh)" "Copyright (c) 2025" "file downloaded" || return 1;
 }
 
 test:smoke:fetch-https() {
 	cat > main <<'EOF'
-source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-args/refs/tags/v1.0.0-alpha/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
-	assert:contains "$(cat .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE)" "Copyright (c) 2025" "file downloaded" || return 1;
+	assert:contains "$(cat .deps/@https/raw.githubusercontent.com/curatorium/bash-args/refs/tags/v1.0.0-alpha/bash-args.sh)" "Copyright (c) 2025" "file downloaded" || return 1;
 }
 
 test:smoke:install() {
@@ -348,7 +348,7 @@ test:feature:license:comments() {
 
 test:feature:fetch:creates-dirs() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
 	[[ -d .deps/@github/curatorium ]] || { echo "directories not created"; return 1; }
@@ -356,11 +356,11 @@ EOF
 
 test:feature:fetch:skips-existing() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
 	import:fetch main "" "$PWD" || return 1;
-	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright (c) 2025" || return 1;
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@latest/bash-args.sh)" "Copyright (c) 2025" || return 1;
 }
 
 test:feature:fetch:no-remote-deps() {
@@ -375,17 +375,17 @@ EOF
 
 test:feature:fetch:stale-refetch() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" 2>/dev/null || return 1;
 	# Make file old (year 2020)
-	touch -t 202001010000 .deps/@github/curatorium/bash-import@main/LICENSE;
+	touch -t 202001010000 .deps/@github/curatorium/bash-args@latest/bash-args.sh;
 	local old_mtime;
-	old_mtime=$(stat -c %Y .deps/@github/curatorium/bash-import@main/LICENSE);
+	old_mtime=$(stat -c %Y .deps/@github/curatorium/bash-args@latest/bash-args.sh);
 	# Refetch — curl -z should detect stale and re-download
 	import:fetch main "" "$PWD" 2>/dev/null || return 1;
 	local new_mtime;
-	new_mtime=$(stat -c %Y .deps/@github/curatorium/bash-import@main/LICENSE);
+	new_mtime=$(stat -c %Y .deps/@github/curatorium/bash-args@latest/bash-args.sh);
 	[[ "$new_mtime" != "$old_mtime" ]] || { echo "mtime should change for stale file"; return 1; }
 }
 
@@ -401,13 +401,13 @@ EOF
 
 test:feature:fetch:dedup() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	local log;
 	log=$(import:fetch main "" "$PWD" 2>&1);
 	local count;
-	count=$(echo "$log" | grep -c "LICENSE");
+	count=$(echo "$log" | grep -c "bash-args.sh");
 	assert "$count" "1" "dedup: one log line for duplicate deps" || return 1;
 }
 
@@ -428,14 +428,6 @@ source .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
 	assert:contains "$(cat .deps/@github/curatorium/bash-args@v1.0.0-alpha/bash-args.sh)" "function args:flag" "named release" || return 1;
-}
-
-test:feature:fallback:branch() {
-	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-args@main/bash-args.sh
-EOF
-	import:fetch main "" "$PWD" || return 1;
-	assert:contains "$(cat .deps/@github/curatorium/bash-args@main/bash-args.sh)" "function args:flag" "branch fallback" || return 1;
 }
 
 # flag forms
@@ -496,18 +488,18 @@ EOF
 
 test:accept:fetch-multiple-deps() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
-source .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
+source .deps/@https/raw.githubusercontent.com/curatorium/bash-args/refs/tags/v1.0.0-alpha/bash-args.sh
 EOF
 	import:fetch main "" "$PWD" || return 1;
-	[[ -f .deps/@github/curatorium/bash-import@main/LICENSE ]] || { echo "github dep missing"; return 1; }
-	[[ -f .deps/@https/raw.githubusercontent.com/curatorium/bash-import/refs/heads/main/LICENSE ]] || { echo "https dep missing"; return 1; }
+	[[ -f .deps/@github/curatorium/bash-args@latest/bash-args.sh ]] || { echo "github dep missing"; return 1; }
+	[[ -f .deps/@https/raw.githubusercontent.com/curatorium/bash-args/refs/tags/v1.0.0-alpha/bash-args.sh ]] || { echo "https dep missing"; return 1; }
 }
 
 test:accept:fetch-then-pack() {
 	cat > main <<'EOF'
 #!/bin/bash
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 echo "done"
 EOF
 	import:fetch main "" "$PWD" || return 1;
@@ -519,11 +511,11 @@ EOF
 
 test:accept:fetch-via-main() {
 	cat > main <<'EOF'
-source .deps/@github/curatorium/bash-import@main/LICENSE
+source .deps/@github/curatorium/bash-args@latest/bash-args.sh
 EOF
 	(cd "$SRC_DIR" && ./bash-import fetch "$TEST_DIR/main") 2>/dev/null;
-	[[ -f .deps/@github/curatorium/bash-import@main/LICENSE ]] || { echo "file not fetched via main"; return 1; }
-	assert:contains "$(cat .deps/@github/curatorium/bash-import@main/LICENSE)" "Copyright" "content fetched" || return 1;
+	[[ -f .deps/@github/curatorium/bash-args@latest/bash-args.sh ]] || { echo "file not fetched via main"; return 1; }
+	assert:contains "$(cat .deps/@github/curatorium/bash-args@latest/bash-args.sh)" "Copyright" "content fetched" || return 1;
 }
 
 test:accept:install-via-main() {
@@ -699,7 +691,6 @@ Scenario       | Input                         | Expected            | Status | 
 ---------------|-------------------------------|---------------------|--------|-------
 latest-release | bash-args@latest/bash-args.sh  | releases/latest/... |      0 | $(t feature:fallback:latest-release)
 named-release  | bash-args@v1.0.0-alpha/...     | releases/download/  |      0 | $(t feature:fallback:named-release)
-branch         | bash-args@main/bash-args.sh    | refs/heads/main/... |      0 | $(t feature:fallback:branch)
 
 ### Flag forms
 Scenario   | Input                        | Expected         | Status | Result

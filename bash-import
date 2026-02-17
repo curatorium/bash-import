@@ -95,7 +95,7 @@ function import:fetch() {
 			local version="${BASH_REMATCH[3]}";
 			local rest="${BASH_REMATCH[4]}";
 
-			# Try: release -> tag -> branch
+			# Try: release -> tag
 			local urls=(
 				"$(
 					[[ "$version" == "latest" ]] &&
@@ -103,7 +103,6 @@ function import:fetch() {
 						echo "https://github.com/$vendor/$repo/releases/download/$version/$rest"
 				)"
 				"https://raw.githubusercontent.com/$vendor/$repo/refs/tags/$version/$rest"
-				"https://raw.githubusercontent.com/$vendor/$repo/refs/heads/$version/$rest"
 			);
 			for url in "${urls[@]}"; do
 				curl -1fsSLR "$url" -z "$dir/.deps/$path" -o "$dir/.deps/$path" 2>/dev/null && break;
