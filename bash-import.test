@@ -617,6 +617,59 @@ test:regress:error:install-invalid-input() {
 	assert "$size" "0" "empty output from invalid input" || return 1;
 }
 
+# Library Tests — .deps/ modules
+#------------------------------------------------------------------------------
+
+test:feature:logs:info() {
+	source "$SRC_DIR/.deps/logs.sh";
+	logger() { echo "$@" >> "$TEST_DIR/log"; }
+	LOGS_TAG="test-app" logs:info "hello world";
+	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-t test-app" "tag passed" || return 1;
+	assert:contains "$result" "-p user.info" "info priority" || return 1;
+	assert:contains "$result" "hello world" "message passed" || return 1;
+}
+
+test:feature:logs:warn() {
+	source "$SRC_DIR/.deps/logs.sh";
+	logger() { echo "$@" >> "$TEST_DIR/log"; }
+	LOGS_TAG="test-app" logs:warn "watch out";
+	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-p user.warn" "warn priority" || return 1;
+	assert:contains "$result" "watch out" "message passed" || return 1;
+}
+
+test:feature:logs:err() {
+	source "$SRC_DIR/.deps/logs.sh";
+	logger() { echo "$@" >> "$TEST_DIR/log"; }
+	LOGS_TAG="test-app" logs:err "broken";
+	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-p user.err" "err priority" || return 1;
+	assert:contains "$result" "broken" "message passed" || return 1;
+}
+
+test:feature:logs:default-tag() {
+	source "$SRC_DIR/.deps/logs.sh";
+	logger() { echo "$@" >> "$TEST_DIR/log"; }
+	unset LOGS_TAG;
+	logs:info "no tag set";
+	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-t" "tag flag present" || return 1;
+}
+
+test:feature:logs:pack() {
+	cp "$SRC_DIR/.deps/logs.sh" .deps/logs.sh;
+	cat > main <<'EOF'
+#!/bin/bash
+source .deps/logs.sh
+EOF
+	local result;
+	result=$(import:pack main /dev/stdout "$PWD" 2>/dev/null);
+	assert:contains "$result" "function logs:info()" "logs:info inlined" || return 1;
+	assert:contains "$result" "function logs:warn()" "logs:warn inlined" || return 1;
+	assert:contains "$result" "function logs:err()" "logs:err inlined" || return 1;
+}
+
 # Output
 #------------------------------------------------------------------------------
 
@@ -703,6 +756,15 @@ Scenario    | Input          | Expected | Status | Result
 ------------|----------------|----------|--------|-------
 permissions | install -m 755 | file 755 |      0 | $(t feature:install:permissions)
 overwrite  | install twice  | new wins |      0 | $(t feature:install:overwrite)
+
+### Library: logs.sh
+Scenario    | Input              | Expected               | Status | Result
+------------|--------------------|------------------------|--------|-------
+info        | logs:info "msg"    | user.info + tag + msg  |      0 | $(t feature:logs:info)
+warn        | logs:warn "msg"    | user.warn + msg        |      0 | $(t feature:logs:warn)
+err         | logs:err "msg"     | user.err + msg         |      0 | $(t feature:logs:err)
+default-tag | no LOGS_TAG set    | falls back to \$0      |      0 | $(t feature:logs:default-tag)
+pack        | source .deps/logs  | all 3 functions inlined|      0 | $(t feature:logs:pack)
 
 ---
 
