@@ -644,8 +644,22 @@ test:feature:logs:err() {
 	logger() { echo "$@" >> "$TEST_DIR/log"; }
 	LOGS_TAG="test-app" logs:err "broken";
 	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-s" "stderr-tee flag present" || return 1;
 	assert:contains "$result" "-p user.err" "err priority" || return 1;
 	assert:contains "$result" "broken" "message passed" || return 1;
+}
+
+test:feature:logs:die() {
+	source "$SRC_DIR/.deps/logs.sh";
+	logger() { echo "$@" >> "$TEST_DIR/log"; }
+	LOGS_TAG="test-app" logs:die "fatal error" || true;
+	local result; result=$(cat "$TEST_DIR/log");
+	assert:contains "$result" "-s" "stderr-tee flag inherited via logs:err" || return 1;
+	assert:contains "$result" "-p user.err" "err priority" || return 1;
+	assert:contains "$result" "fatal error" "message passed" || return 1;
+	# verify it returns 1
+	LOGS_TAG="test-app" logs:die "should fail";
+	[[ $? -ne 0 ]] || { echo "should return non-zero"; return 1; }
 }
 
 test:feature:logs:default-tag() {
@@ -763,6 +777,7 @@ Scenario    | Input              | Expected               | Status | Result
 info        | logs:info "msg"    | user.info + tag + msg  |      0 | $(t feature:logs:info)
 warn        | logs:warn "msg"    | user.warn + msg        |      0 | $(t feature:logs:warn)
 err         | logs:err "msg"     | user.err + msg         |      0 | $(t feature:logs:err)
+die         | logs:die "msg"     | user.err + return 1    |      0 | $(t feature:logs:die)
 default-tag | no LOGS_TAG set    | falls back to \$0      |      0 | $(t feature:logs:default-tag)
 pack        | source .deps/logs  | all 3 functions inlined|      0 | $(t feature:logs:pack)
 

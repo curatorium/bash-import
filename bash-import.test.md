@@ -86,6 +86,7 @@ Scenario    | Input              | Expected               | Status | Result
 info        | logs:info "msg"    | user.info + tag + msg  |      0 | ✅
 warn        | logs:warn "msg"    | user.warn + msg        |      0 | ✅
 err         | logs:err "msg"     | user.err + msg         |      0 | ✅
+die         | logs:die "msg"     | user.err + return 1    |      0 | ✅
 default-tag | no LOGS_TAG set    | falls back to $0      |      0 | ✅
 pack        | source .deps/logs  | all 3 functions inlined|      0 | ✅
 
@@ -121,5 +122,5 @@ install-invalid-input| install with bad input file  |      0 | ✅
 
 | ✅ Pass | ❌ Fail | ⚠️ Error |
 |---------|---------|----------|
-| 57 | 0 | 0 |
+| 58 | 0 | 0 |
 
