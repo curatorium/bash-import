@@ -17,13 +17,17 @@ function logs:warn() { logger -t "${LOGS_TAG:-${0##*/}}" -p user.warn "$@"; }
 # @name logs:err
 # @type function
 # @desc Log at err level via syslog AND echo to stderr.
-# @desc Tag defaults to the script's namespace. The `-s` flag tees the message to
-# @desc stderr so CLIs surface errors to the user (and parent processes that
-# @desc capture stderr) without adding a separate code path. Daemons whose stderr
-# @desc goes to /dev/null or the systemd journal are unaffected.
+# @desc Two writes (syslog + stderr) instead of `logger -s` to avoid the
+# @desc RFC-syslog prefix `<11>Mon DD HH:MM:SS` that `logger -s` prepends to
+# @desc stderr output. Daemons whose stderr is /dev/null or systemd-journal are
+# @desc unaffected (stderr write is silent / re-captured); CLIs see clean
+# @desc `<tag>: <message>` lines for the user.
 # @usage logs:err <message...>
 # @arg <message...> -- Message to log
-function logs:err() { logger -s -t "${LOGS_TAG:-${0##*/}}" -p user.err "$@"; }
+function logs:err() {
+	logger -t "${LOGS_TAG:-${0##*/}}" -p user.err "$@";
+	printf '%s: %s\n' "${LOGS_TAG:-${0##*/}}" "$*" >&2;
+}
 
 # @name logs:die
 # @type function

@@ -642,23 +642,30 @@ test:feature:logs:warn() {
 test:feature:logs:err() {
 	source "$SRC_DIR/.deps/logs.sh";
 	logger() { echo "$@" >> "$TEST_DIR/log"; }
-	LOGS_TAG="test-app" logs:err "broken";
-	local result; result=$(cat "$TEST_DIR/log");
-	assert:contains "$result" "-s" "stderr-tee flag present" || return 1;
-	assert:contains "$result" "-p user.err" "err priority" || return 1;
-	assert:contains "$result" "broken" "message passed" || return 1;
+	local stderr; stderr=$(LOGS_TAG="test-app" logs:err "broken" 2>&1 >/dev/null);
+	local syslog; syslog=$(cat "$TEST_DIR/log");
+
+	# syslog write
+	assert:contains "$syslog" "-p user.err" "err priority" || return 1;
+	assert:contains "$syslog" "broken" "syslog message passed" || return 1;
+
+	# stderr write (clean, no RFC syslog prefix)
+	assert:contains "$stderr" "test-app: broken" "stderr line" || return 1;
+	[[ ! "$stderr" =~ \<[0-9]+\> ]] || { echo "stderr has syslog prefix: $stderr"; return 1; }
 }
 
 test:feature:logs:die() {
 	source "$SRC_DIR/.deps/logs.sh";
 	logger() { echo "$@" >> "$TEST_DIR/log"; }
-	LOGS_TAG="test-app" logs:die "fatal error" || true;
-	local result; result=$(cat "$TEST_DIR/log");
-	assert:contains "$result" "-s" "stderr-tee flag inherited via logs:err" || return 1;
-	assert:contains "$result" "-p user.err" "err priority" || return 1;
-	assert:contains "$result" "fatal error" "message passed" || return 1;
+	local stderr; stderr=$(LOGS_TAG="test-app" logs:die "fatal error" 2>&1 >/dev/null) || true;
+	local syslog; syslog=$(cat "$TEST_DIR/log");
+
+	assert:contains "$syslog" "-p user.err" "err priority" || return 1;
+	assert:contains "$syslog" "fatal error" "syslog message" || return 1;
+	assert:contains "$stderr" "test-app: fatal error" "stderr line" || return 1;
+
 	# verify it returns 1
-	LOGS_TAG="test-app" logs:die "should fail";
+	LOGS_TAG="test-app" logs:die "should fail" 2>/dev/null;
 	[[ $? -ne 0 ]] || { echo "should return non-zero"; return 1; }
 }
 
