@@ -1,0 +1,414 @@
+source ./.deps/strict.sh;
+source ./.deps/logs.sh;
+source ./.deps/@github/curatorium/bash-args@latest/bash-args.sh;
+source ./.deps/fetch.sh;
+
+# Test Fixtures
+#------------------------------------------------------------------------------
+
+setup() {
+	# Silence logs:err for the duration of each test -- we assert on return
+	# codes and URL outputs, not on the human-readable error message format.
+	logs:err() { :; };
+	logs:warn() { :; };
+	logs:info() { :; };
+}
+
+# Helper: mock a tarball at $1 with literal entry paths from stdin (one per line).
+# Uses --transform to inject the literal path into the archive metadata, and -P
+# so absolute and `..` paths survive tar's default normalization. This lets us
+# build adversarial archives (`/etc/passwd`, `../etc/passwd`) without needing
+# the host filesystem to actually have those paths.
+mock:tarball() {
+	local out="$1";
+	local stage; stage=$(mktemp -d);
+	local -a names=() transforms=();
+	local i=0 p;
+	while IFS= read -r p; do
+		[[ -z "$p" ]] && continue;
+		echo "content of $p" > "$stage/file$i";
+		names+=("file$i");
+		transforms+=("--transform" "s|^file${i}\$|$p|");
+		((i++));
+	done
+	(cd "$stage" && tar -czf "$out" -P "${transforms[@]}" -- "${names[@]}");
+	rm -rf "$stage";
+}
+
+# Smoke Tests -- happy path through the URL conversion matrix
+#------------------------------------------------------------------------------
+
+test:smoke:gh-archive-tag() {
+	local url="";
+	fetch::gh-to-url url "curatorium/curated@v1/redis" tag true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/redis" || return 1;
+}
+
+test:smoke:gh-archive-branch() {
+	local url="";
+	fetch::gh-to-url url "curatorium/curated@main/redis" branch true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/heads/main.tar.gz#/redis" || return 1;
+}
+
+test:smoke:gh-archive-release-normalized() {
+	local url="";
+	fetch::gh-to-url url "curatorium/curated@v1/redis" release true || return 1;
+	# archive/release normalizes to archive/tag inside fetch::gh-to-url
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/redis" || return 1;
+}
+
+test:smoke:gh-file-tag() {
+	local url="";
+	fetch::gh-to-url url "curatorium/bash-import@v1.0/bash-import" tag "" || return 1;
+	assert "$url" "https://github.com/curatorium/bash-import/raw/v1.0/bash-import" || return 1;
+}
+
+test:smoke:gh-file-branch() {
+	local url="";
+	fetch::gh-to-url url "curatorium/bash-import@main/bash-import" branch "" || return 1;
+	assert "$url" "https://github.com/curatorium/bash-import/raw/main/bash-import" || return 1;
+}
+
+test:smoke:gh-file-release() {
+	local url="";
+	fetch::gh-to-url url "curatorium/bash-import@v1.0/bash-import" release "" || return 1;
+	assert "$url" "https://github.com/curatorium/bash-import/releases/download/v1.0/bash-import" || return 1;
+}
+
+test:smoke:gh-file-release-latest() {
+	local url="";
+	fetch::gh-to-url url "curatorium/bash-import@latest/bash-import" release "" || return 1;
+	assert "$url" "https://github.com/curatorium/bash-import/releases/latest/download/bash-import" || return 1;
+}
+
+# Feature Tests -- prefix stripping, defaults, fragments
+#------------------------------------------------------------------------------
+
+test:feature:prefix-gh() {
+	local url="";
+	fetch::gh-to-url url "gh:curatorium/curated@v1/redis" tag true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/redis" || return 1;
+}
+
+test:feature:prefix-github() {
+	local url="";
+	fetch::gh-to-url url "github:curatorium/curated@v1/redis" tag true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/redis" || return 1;
+}
+
+test:feature:prefix-at-github() {
+	local url="";
+	fetch::gh-to-url url "@github/curatorium/curated@v1/redis" tag true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/redis" || return 1;
+}
+
+test:feature:archive-no-subpath() {
+	local url="";
+	fetch::gh-to-url url "curatorium/curated@v1" tag true || return 1;
+	# No fragment when no subpath -- extracts the whole repo
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz" || return 1;
+}
+
+test:feature:nested-subpath() {
+	local url="";
+	fetch::gh-to-url url "curatorium/curated@v1/some/nested/redis" tag true || return 1;
+	assert "$url" "https://github.com/curatorium/curated/archive/refs/tags/v1.tar.gz#/some/nested/redis" || return 1;
+}
+
+# Negative Tests -- inputs we must reject
+#------------------------------------------------------------------------------
+
+test:negative:archive-latest() {
+	local url="" rc;
+	fetch::gh-to-url url "curatorium/curated@latest/redis" tag true && rc=0 || rc=$?;
+	assert:status "$rc" 2 "archive+latest should fail with rc=2" || return 1;
+}
+
+test:negative:file-no-subpath() {
+	local url="" rc;
+	fetch::gh-to-url url "curatorium/bash-import@v1" tag "" && rc=0 || rc=$?;
+	assert:status "$rc" 2 "file mode without subpath should fail with rc=2" || return 1;
+}
+
+test:negative:malformed-ref() {
+	local url="" rc;
+	fetch::gh-to-url url "not-a-valid-ref" tag true && rc=0 || rc=$?;
+	assert:status "$rc" 2 "malformed ref should fail with rc=2" || return 1;
+}
+
+test:negative:missing-version() {
+	local url="" rc;
+	fetch::gh-to-url url "curatorium/curated/redis" tag true && rc=0 || rc=$?;
+	assert:status "$rc" 2 "ref without @version should fail with rc=2" || return 1;
+}
+
+# Negative Tests for fetch:url's URL-scheme guards
+#------------------------------------------------------------------------------
+
+test:negative:http-rejected() {
+	local rc;
+	fetch:url "http://example.com/foo" -o /tmp/x.out && rc=0 || rc=$?;
+	assert:status "$rc" 4 "http:// should be rejected with rc=4" || return 1;
+}
+
+test:negative:ftp-rejected() {
+	local rc;
+	fetch:url "ftp://example.com/foo" -o /tmp/x.out && rc=0 || rc=$?;
+	assert:status "$rc" 4 "ftp:// should be rejected with rc=4" || return 1;
+}
+
+test:negative:file-rejected() {
+	local rc;
+	fetch:url "file:///etc/passwd" -o /tmp/x.out && rc=0 || rc=$?;
+	assert:status "$rc" 4 "file:// should be rejected with rc=4" || return 1;
+}
+
+# Feature Tests for fetch::is-blocked-ip
+#------------------------------------------------------------------------------
+
+test:feature:blocked-loopback() {
+	fetch::is-blocked-ip "127.0.0.1" || return 1;
+}
+
+test:feature:blocked-rfc1918-10() {
+	fetch::is-blocked-ip "10.1.2.3" || return 1;
+}
+
+test:feature:blocked-rfc1918-192() {
+	fetch::is-blocked-ip "192.168.1.1" || return 1;
+}
+
+test:feature:blocked-link-local() {
+	# AWS metadata service IP -- common SSRF target
+	fetch::is-blocked-ip "169.254.169.254" || return 1;
+}
+
+test:feature:blocked-rfc1918-172-low() {
+	fetch::is-blocked-ip "172.16.0.1" || return 1;
+}
+
+test:feature:blocked-rfc1918-172-high() {
+	fetch::is-blocked-ip "172.31.255.255" || return 1;
+}
+
+test:feature:blocked-ipv6-loopback() {
+	fetch::is-blocked-ip "::1" || return 1;
+}
+
+test:feature:blocked-ipv4-mapped-ipv6() {
+	# IPv4-mapped IPv6 form of 127.0.0.1
+	fetch::is-blocked-ip "::ffff:127.0.0.1" || return 1;
+}
+
+test:feature:allowed-public() {
+	# Google DNS -- definitely public
+	! fetch::is-blocked-ip "8.8.8.8" || return 1;
+}
+
+test:feature:allowed-172-outside-rfc1918() {
+	# 172.32.x.y is OUTSIDE RFC1918 (the range stops at 172.31.x.y)
+	! fetch::is-blocked-ip "172.32.0.1" || return 1;
+}
+
+# Feature Tests for fetch::https with mocked tar (SIGPIPE / fragment / safety)
+#------------------------------------------------------------------------------
+
+test:feature:tar-safety-absolute-path() {
+	local archive="$PWD/bad.tar.gz" rc;
+	printf '%s\n' '/etc/passwd' 'normal.txt' | mock:tarball "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	fetch::https "https://example.com/x.tar.gz#/redis" "$PWD/dest" true && rc=0 || rc=$?;
+	assert:status "$rc" 4 "absolute path in tar should be rejected with rc=4" || return 1;
+}
+
+test:feature:tar-safety-traversal() {
+	local archive="$PWD/bad.tar.gz" rc;
+	printf '%s\n' '../etc/passwd' 'normal.txt' | mock:tarball "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	fetch::https "https://example.com/x.tar.gz#/redis" "$PWD/dest" true && rc=0 || rc=$?;
+	assert:status "$rc" 4 ".. traversal in tar should be rejected with rc=4" || return 1;
+}
+
+test:feature:selective-extract-subpath() {
+	local archive="$PWD/ok.tar.gz" rc;
+	printf '%s\n' 'repo-v1/redis/curated.yml' 'repo-v1/mysql/curated.yml' 'repo-v1/README.md' \
+		| mock:tarball "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	mkdir -p "$PWD/dest";
+	fetch::https "https://example.com/x.tar.gz#/redis" "$PWD/dest" true || return 1;
+
+	[[ -f "$PWD/dest/curated.yml" ]] || { echo "expected dest/curated.yml after selective extract"; return 1; };
+	[[ ! -d "$PWD/dest/mysql" ]] || { echo "mysql/ should NOT have been extracted"; return 1; };
+}
+
+test:feature:full-extract-strips-prefix() {
+	local archive="$PWD/ok.tar.gz" rc;
+	printf '%s\n' 'repo-v1/curated.yml' 'repo-v1/README.md' | mock:tarball "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	mkdir -p "$PWD/dest";
+	fetch::https "https://example.com/x.tar.gz" "$PWD/dest" true || return 1;
+
+	# Top-level wrapper dir is stripped; files land at dest root.
+	[[ -f "$PWD/dest/curated.yml" ]] || { echo "expected dest/curated.yml after full extract"; return 1; };
+	[[ ! -d "$PWD/dest/repo-v1" ]] || { echo "wrapper dir should be stripped"; return 1; };
+}
+
+test:feature:fragment-not-in-archive() {
+	local archive="$PWD/ok.tar.gz" rc;
+	printf '%s\n' 'repo-v1/redis/curated.yml' | mock:tarball "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	mkdir -p "$PWD/dest";
+	fetch::https "https://example.com/x.tar.gz#/nonexistent" "$PWD/dest" true && rc=0 || rc=$?;
+	assert:status "$rc" 3 "missing subpath should fail with rc=3" || return 1;
+}
+
+test:feature:file-mode-saves-as-is() {
+	local archive="$PWD/raw.bin" rc;
+	echo "binary contents" > "$archive";
+
+	getent() { echo "8.8.8.8 fake"; };
+	curl() {
+		local out="";
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == "-o" ]] && { out="$2"; shift 2; continue; };
+			shift;
+		done
+		cp "$archive" "$out";
+	};
+	export -f getent curl;
+
+	fetch::https "https://example.com/binary" "$PWD/dest.bin" "" || return 1;
+	assert "$(cat "$PWD/dest.bin")" "binary contents" || return 1;
+}
+
+# Output table
+#------------------------------------------------------------------------------
+
+output() {
+	cat <<-MD
+		# fetch.sh tests
+
+		Tests for \`fetch:url\`, \`fetch::gh-to-url\`, \`fetch::https\`, and \`fetch::is-blocked-ip\`.
+
+		---
+
+		## Smoke -- the 2x3 URL matrix (plus latest)
+
+		| Cell                       | Input                                  | Expected URL family                 | Result                          |
+		|----------------------------|----------------------------------------|-------------------------------------|---------------------------------|
+		| archive + tag (default)    | curatorium/curated@v1/redis            | /archive/refs/tags/v1.tar.gz#/redis | $(t smoke:gh-archive-tag)               |
+		| archive + branch           | curatorium/curated@main/redis          | /archive/refs/heads/main.tar.gz     | $(t smoke:gh-archive-branch)            |
+		| archive + release (norm.)  | curatorium/curated@v1/redis            | normalizes to archive+tag           | $(t smoke:gh-archive-release-normalized) |
+		| file + tag                 | curatorium/bash-import@v1.0/bash-import| /raw/v1.0/bash-import               | $(t smoke:gh-file-tag)                  |
+		| file + branch              | curatorium/bash-import@main/bash-import| /raw/main/bash-import               | $(t smoke:gh-file-branch)               |
+		| file + release             | curatorium/bash-import@v1.0/...        | /releases/download/v1.0/...         | $(t smoke:gh-file-release)              |
+		| file + release + @latest   | curatorium/bash-import@latest/...      | /releases/latest/download/...       | $(t smoke:gh-file-release-latest)       |
+
+		---
+
+		## Feature -- prefix stripping, defaults, fragments
+
+		| Scenario               | Input prefix or shape       | Expected                          | Result                              |
+		|------------------------|-----------------------------|-----------------------------------|-------------------------------------|
+		| gh: prefix             | gh:vendor/pkg@v/sub         | same URL as canonical             | $(t feature:prefix-gh)                  |
+		| github: prefix         | github:vendor/pkg@v/sub     | same URL as canonical             | $(t feature:prefix-github)              |
+		| @github/ prefix        | @github/vendor/pkg@v/sub    | same URL as canonical             | $(t feature:prefix-at-github)           |
+		| archive, no subpath    | vendor/pkg@v (no /sub)      | no #fragment in URL               | $(t feature:archive-no-subpath)         |
+		| nested subpath         | vendor/pkg@v/a/b/c          | fragment encodes full subpath     | $(t feature:nested-subpath)             |
+
+		## Feature -- fetch::is-blocked-ip coverage
+
+		| IP                      | Class                       | Expected | Result                                |
+		|-------------------------|-----------------------------|----------|---------------------------------------|
+		| 127.0.0.1               | IPv4 loopback               | blocked  | $(t feature:blocked-loopback)             |
+		| 10.1.2.3                | RFC1918 10.x                | blocked  | $(t feature:blocked-rfc1918-10)           |
+		| 192.168.1.1             | RFC1918 192.168.x           | blocked  | $(t feature:blocked-rfc1918-192)          |
+		| 169.254.169.254         | link-local (AWS metadata)   | blocked  | $(t feature:blocked-link-local)           |
+		| 172.16.0.1              | RFC1918 172.16.x (boundary) | blocked  | $(t feature:blocked-rfc1918-172-low)      |
+		| 172.31.255.255          | RFC1918 172.31.x (boundary) | blocked  | $(t feature:blocked-rfc1918-172-high)     |
+		| ::1                     | IPv6 loopback               | blocked  | $(t feature:blocked-ipv6-loopback)        |
+		| ::ffff:127.0.0.1        | IPv4-mapped IPv6            | blocked  | $(t feature:blocked-ipv4-mapped-ipv6)     |
+		| 8.8.8.8                 | public                      | allowed  | $(t feature:allowed-public)               |
+		| 172.32.0.1              | just outside RFC1918        | allowed  | $(t feature:allowed-172-outside-rfc1918)  |
+
+		## Feature -- fetch::https tar safety, selective extract (mocked curl)
+
+		| Scenario              | Input                            | Expected                       | Result                              |
+		|-----------------------|----------------------------------|--------------------------------|-------------------------------------|
+		| absolute path entry   | tar contains /etc/passwd         | rc=4 (rejected)                | $(t feature:tar-safety-absolute-path)   |
+		| .. traversal entry    | tar contains ../etc/passwd       | rc=4 (rejected)                | $(t feature:tar-safety-traversal)       |
+		| selective extract     | archive#/redis, archive has redis/, mysql/ | only redis/ in dest    | $(t feature:selective-extract-subpath)  |
+		| full extract          | archive, no fragment             | top-level wrapper stripped     | $(t feature:full-extract-strips-prefix) |
+		| fragment not in tar   | archive#/nonexistent             | rc=3 (subpath missing)         | $(t feature:fragment-not-in-archive)    |
+		| file mode             | URL, no --unpack                 | saved as-is, contents preserved| $(t feature:file-mode-saves-as-is)      |
+
+		---
+
+		## Negative -- inputs we must reject
+
+		| Scenario              | Input                              | Expected rc | Result                          |
+		|-----------------------|------------------------------------|-------------|---------------------------------|
+		| archive + @latest     | vendor/pkg@latest/sub --unpack tag | 2           | $(t negative:archive-latest)        |
+		| file mode no subpath  | vendor/pkg@v --no-unpack tag       | 2           | $(t negative:file-no-subpath)       |
+		| malformed ref         | not-a-valid-ref                    | 2           | $(t negative:malformed-ref)         |
+		| missing @version      | vendor/pkg/sub                     | 2           | $(t negative:missing-version)       |
+		| http:// rejected      | fetch:url http://...               | 4           | $(t negative:http-rejected)         |
+		| ftp:// rejected       | fetch:url ftp://...                | 4           | $(t negative:ftp-rejected)          |
+		| file:// rejected      | fetch:url file://...               | 4           | $(t negative:file-rejected)         |
+	MD
+}
